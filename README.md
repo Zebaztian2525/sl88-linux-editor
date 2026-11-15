@@ -29,11 +29,14 @@ python3 -m venv ~/sl88env
 source ~/sl88env/bin/activate
 pip install mido python-rtmidi
 ```
-Step 4: Run the editor. Make sure your SL88 is connected via USB, and that Bitwig (or any other DAW) is closed so the MIDI port is free. Then run:
+Step 4: Run the editor. Make sure your SL88 is connected via USB. Then run:
 ```
 python3 sl88_gui.py
 ```
 A window will open. Choose your port (e.g., SL STUDIO MIDI 2), click Anslut (Connect), and you are ready to edit your keyboard! Note: The dark mode can be toggled from the "Visa" menu.
+
+You don't have to close your DAW (like Bitwig) to use this editor! Because the SL88 has two separate MIDI ports, you can keep making music while tweaking your keyboard settings.
+Just make sure to **start your DAW first**, and then select **"SL STUDIO MIDI 2"** (the second port) in the editor's port list. This way, your DAW uses the first port for playing notes, while the editor uses the second port for SysEx communication. They work perfectly side-by-side!
 
 Status: The protocol and CLI are fully functional. The GUI (sl88_gui.py) is complete but always open for improvements. Contributions are very welcome!
 
