@@ -5,6 +5,8 @@ The protocol and CLI are fully functional. The GUI (sl88_gui.py) is partially co
 
 Features: Read and display all 250 programs. Rename programs. Change velocity curves (soft, medium, hard, memory4-9). Map joystick axes (Stick 1-3, X/Y) to Pitch Bend, Aftertouch, or CC messages. Save changes to the keyboard's memory. Dark mode support.
 
+Note: The graphical user interface (GUI) is in Swedish (e.g., "Anslut" means "Connect" and "Visa" means "View").
+
 <img width="1918" height="1078" alt="image" src="https://github.com/user-attachments/assets/70fbe4da-9b7e-4826-8624-e46e391b3382" />
 
 How to install and run:
