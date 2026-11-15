@@ -15,7 +15,7 @@ Open a terminal and copy-paste this command:
 sudo apt update
 sudo apt install python3 python3-venv python3-tk build-essential libasound2-dev
 
-2. Download the files
+### 2. Download the files
 Download the three Python files from this GitHub page (sl88_protocol.py, sl88_editor.py, and sl88_gui.py).
 Put them in a folder on your computer, for example ~/sl88-editor.
 
@@ -23,14 +23,14 @@ mkdir ~/sl88-editor
 cd ~/sl88-editor
 #Now move or copy the three files into this folder.
 
-3. Create a virtual environment and install MIDI libraries
+### 3. Create a virtual environment and install MIDI libraries
 Run these commands one by one:
 
 python3 -m venv ~/sl88env
 source ~/sl88env/bin/activate
 pip install mido python-rtmidi
 
-4. Run the editor
+### 4. Run the editor
 Make sure your SL88 is connected via USB, and that Bitwig (or any other DAW) is closed so the MIDI port is free. Then run:
 
 python3 sl88_gui.py
