@@ -21,7 +21,7 @@ Put them in a folder on your computer, for example ~/sl88-editor.
 
 mkdir ~/sl88-editor
 cd ~/sl88-editor
-# Now move or copy the three files into this folder.
+#Now move or copy the three files into this folder.
 
 3. Create a virtual environment and install MIDI libraries
 Run these commands one by one:
