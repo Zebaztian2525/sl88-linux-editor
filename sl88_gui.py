@@ -2,38 +2,35 @@
 # -*- coding: utf-8 -*-
 """
 sl88_gui.py - Tkinter-editor för Studiologic SL88 Studio (Linux).
-
 Lägg filen i samma mapp som sl88_protocol.py och sl88_editor.py:
-
-    sudo apt install python3-tk
-    source ~/sl88env/bin/activate
-    python3 sl88_gui.py
-
+sudo apt install python3-tk
+source ~/sl88env/bin/activate
+python3 sl88_gui.py
 Arkitektur:
-  * ALL MIDI-kommunikation går via sl88_editor.SL88Editor och körs i EN
-    arbetstråd (MidiWorker). GUI-tråden anropar aldrig mido/SL88Editor.
-  * Resultat skickas tillbaka som rena datakopior via en queue som töms
-    med root.after() -> fönstret fryser inte under en config dump.
-  * print()-utskrifter från SL88Editor fångas (redirect_stdout) och visas
-    i loggrutan. Det är process-globalt, men bara arbetstråden printar.
-
+* ALL MIDI-kommunikation går via sl88_editor.SL88Editor och körs i EN
+arbetstråd (MidiWorker). GUI-tråden anropar aldrig mido/SL88Editor.
+* Resultat skickas tillbaka som rena datakopior via en queue som töms
+med root.after() -> fönstret fryser inte under en config dump.
+* print()-utskrifter från SL88Editor fångas (redirect_stdout) och visas
+i loggrutan. Det är process-globalt, men bara arbetstråden printar.
 Upplägg följer SL Editor-manualen: PROGRAM-lista, PROGRAM-namn, ZONE 1-4,
 STICK 1-3 (X/Y per zon, färgkodat som manualen) och SL CURVES.
+Temastöd: Meny -> Visa -> Dark Mode växlar mellan ljust och mörkt tema.
+Valet sparas i ~/.sl88_gui_prefs.json.
 """
-
 import contextlib
+import json
 import queue
 import sys
 import threading
 import traceback
-
+from pathlib import Path
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, scrolledtext
 except ImportError:
     print("tkinter saknas. Installera: sudo apt install python3-tk")
     sys.exit(1)
-
 try:
     import mido
     import sl88_protocol as p
@@ -71,19 +68,16 @@ ZONE_STYLES = {
 }
 STICKS_BG = "#2b3038"
 
-
 def note_name(n):
     """MIDI-notnummer -> namn (21 = A0, 108 = C8, som i dumpen)."""
     if not isinstance(n, int) or not 0 <= n <= 127:
         return str(n)
     return f"{NOTE_NAMES[n % 12]}{n // 12 - 1}"
 
-
 def require(ed):
     if ed is None:
         raise RuntimeError("Inte ansluten till SL88.")
     return ed
-
 
 def snapshot(ed):
     """Kopia av editorns tillstånd - GUI-tråden läser aldrig ed direkt."""
@@ -94,17 +88,14 @@ def snapshot(ed):
         "dry_run": ed.dry_run,
     }
 
-
 # ---------------------------------------------------------------------------
 # Brygga mellan arbetstråd och GUI
 # ---------------------------------------------------------------------------
 class QueueWriter:
     """Fil-liknande objekt: fångar print() och skickar rader till GUI-kön."""
-
     def __init__(self, out_q):
         self.q = out_q
         self.buf = ""
-
     def write(self, s):
         self.buf += s
         while "\n" in self.buf:
@@ -112,46 +103,36 @@ class QueueWriter:
             if line.strip():
                 self.q.put(("log", line))
         return len(s)
-
     def flush(self):
         if self.buf.strip():
             self.q.put(("log", self.buf))
-        self.buf = ""
-
+            self.buf = ""
     def isatty(self):
         return False
-
 
 class Job:
     """fn(editor) körs i arbetstråden; on_done(result) körs i GUI-tråden.
     key != None betyder 'bara det senaste jobbet av denna sort körs'."""
-
     __slots__ = ("fn", "on_done", "label", "key")
-
     def __init__(self, fn, on_done=None, label="Arbetar", key=None):
         self.fn = fn
         self.on_done = on_done
         self.label = label
         self.key = key
 
-
 class MidiWorker(threading.Thread):
     """Äger SL88Editor och gör alla mido-anrop, seriellt, i en tråd."""
-
     def __init__(self, out_q):
         super().__init__(daemon=True)
         self.out = out_q
         self.jobs = queue.Queue()
         self.editor = None
         self._stopping = threading.Event()
-
     # -- anropas från GUI-tråden -----------------------------------------
     def submit(self, job):
         self.jobs.put(job)
-
     def stop(self):
         self._stopping.set()
-
     # -- körs i arbetstråden ---------------------------------------------
     def close_editor(self):
         if self.editor is not None:
@@ -160,7 +141,6 @@ class MidiWorker(threading.Thread):
             except Exception:
                 pass
             self.editor = None
-
     def _drop_stale(self, job):
         """Finns ett nyare jobb med samma key i kön? Hoppa över detta."""
         if job.key is None:
@@ -178,7 +158,6 @@ class MidiWorker(threading.Thread):
             self.out.put(("cancelled", job))
             return None
         return job
-
     def _run_job(self, job):
         self.out.put(("status", job.label + " …"))
         writer = QueueWriter(self.out)
@@ -193,7 +172,6 @@ class MidiWorker(threading.Thread):
         else:
             writer.flush()
             self.out.put(("done", job, result))
-
     def run(self):
         while not self._stopping.is_set():
             try:
@@ -205,7 +183,6 @@ class MidiWorker(threading.Thread):
                 self._run_job(job)
         self.close_editor()
 
-
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
@@ -215,7 +192,6 @@ class SL88App(tk.Tk):
         self.title("SL88 Editor – Studiologic SL88 Studio")
         self.geometry("1180x800")
         self.minsize(980, 620)
-
         style = ttk.Style(self)
         if "clam" in style.theme_names():
             style.theme_use("clam")
@@ -230,16 +206,13 @@ class SL88App(tk.Tk):
         self.out_q = queue.Queue()
         self.worker = MidiWorker(self.out_q)
         self.worker.start()
-
         self.connected = False
         self.pending = 0
         self.closing = False
-
         self.names = {}             # 0-baserat programnummer -> namn
         self.curves = {}            # kurvplats 0..8 -> dict
         self.pdata = None           # tolkad programdata för vald plats
         self.current_program = None # 1-baserat
-
         self._conn_widgets = []
         self._prog_widgets = []
         self.zone_vars = []
@@ -248,11 +221,198 @@ class SL88App(tk.Tk):
         self.stick_raw = {}         # (zon, stick) -> Label med råvärden
         self.stick_range = {}       # zon -> Label med tangentomfång
 
+        # ---- Dark mode-stöd ---------------------------------------------
+        self.dark_var = tk.BooleanVar(value=False)
+
         self._build_ui()
+        self._build_menu()
+        self._load_prefs()
+        self._apply_theme(self.dark_var.get())
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._set_connected(False)
         self.after(30, self._poll)
         self.refresh_ports()
+
+    # -- meny -----------------------------------------------------------
+    def _build_menu(self):
+        menubar = tk.Menu(self)
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_checkbutton(label="Dark Mode",
+                                  variable=self.dark_var,
+                                  command=self._toggle_dark_mode)
+        menubar.add_cascade(label="Visa", menu=view_menu)
+        self.config(menu=menubar)
+
+    # -- tema-inställningar --------------------------------------------
+    def _prefs_path(self):
+        return Path.home() / ".sl88_gui_prefs.json"
+
+    def _load_prefs(self):
+        try:
+            data = json.loads(self._prefs_path().read_text(encoding="utf-8"))
+            self.dark_var.set(bool(data.get("dark_mode", False)))
+        except Exception:
+            self.dark_var.set(False)
+
+    def _save_prefs(self):
+        try:
+            self._prefs_path().write_text(
+                json.dumps({"dark_mode": self.dark_var.get()}, indent=2),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def _toggle_dark_mode(self):
+        self._apply_theme(self.dark_var.get())
+        self._save_prefs()
+
+    def _apply_theme(self, dark):
+        """Sätter färger på hela fönstret beroende på dark/light-läge."""
+        style = ttk.Style(self)
+        if "clam" not in style.theme_names():
+            return
+        style.theme_use("clam")
+
+        if dark:
+            pal = {
+                "bg":        "#2b2b2b",
+                "fg":        "#e0e0e0",
+                "surface":   "#333333",
+                "surface2":  "#3c3c3c",
+                "accent":    "#4a9eff",
+                "disabled":  "#666666",
+                "select_bg": "#094771",
+                "select_fg": "#ffffff",
+                "entry_bg":  "#1e1e1e",
+                "trough":    "#252525",
+                "info_fg":   "#b0b0b0",
+                "muted_fg":  "#999999",
+            }
+        else:
+            pal = {
+                "bg":        "#f0f0f0",
+                "fg":        "#000000",
+                "surface":   "#ffffff",
+                "surface2":  "#e0e0e0",
+                "accent":    "#0078d4",
+                "disabled":  "#a0a0a0",
+                "select_bg": "#0078d4",
+                "select_fg": "#ffffff",
+                "entry_bg":  "#ffffff",
+                "trough":    "#d0d0d0",
+                "info_fg":   "#555555",
+                "muted_fg":  "#666666",
+            }
+
+        # Huvudfönster
+        self.configure(bg=pal["bg"])
+
+        # Bas-stil
+        style.configure(".", background=pal["bg"], foreground=pal["fg"],
+                        fieldbackground=pal["surface"], borderwidth=0)
+
+        # Ramar och etiketter
+        style.configure("TFrame", background=pal["bg"])
+        style.configure("TLabel", background=pal["bg"], foreground=pal["fg"])
+
+        # Knappar
+        style.configure("TButton", background=pal["surface"],
+                        foreground=pal["fg"], borderwidth=1, padding=(8, 3))
+        style.map("TButton",
+                  background=[("active", pal["surface2"]),
+                              ("pressed", pal["accent"]),
+                              ("disabled", pal["bg"])],
+                  foreground=[("disabled", pal["disabled"])])
+
+        # Textfält
+        style.configure("TEntry", fieldbackground=pal["entry_bg"],
+                        foreground=pal["fg"], insertcolor=pal["fg"])
+
+        # Combobox
+        style.configure("TCombobox", fieldbackground=pal["entry_bg"],
+                        foreground=pal["fg"],
+                        selectbackground=pal["select_bg"],
+                        selectforeground=pal["select_fg"])
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", pal["surface"])],
+                  foreground=[("disabled", pal["disabled"])],
+                  arrowcolor=[("disabled", pal["disabled"])])
+
+        # Checkbutton
+        style.configure("TCheckbutton", background=pal["bg"],
+                        foreground=pal["fg"], indicatorcolor=pal["surface"])
+        style.map("TCheckbutton",
+                  foreground=[("disabled", pal["disabled"])],
+                  indicatorcolor=[("selected", pal["accent"]),
+                                  ("active", pal["surface2"])])
+
+        # LabelFrame
+        style.configure("TLabelframe", background=pal["bg"],
+                        foreground=pal["fg"])
+        style.configure("TLabelframe.Label", background=pal["bg"],
+                        foreground=pal["accent"])
+
+        # Notebook (flikar)
+        style.configure("TNotebook", background=pal["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", background=pal["surface"],
+                        foreground=pal["fg"], padding=(14, 6))
+        style.map("TNotebook.Tab",
+                  background=[("selected", pal["accent"]),
+                              ("active", pal["surface2"])],
+                  foreground=[("selected", pal["select_fg"])])
+
+        # Treeview
+        style.configure("Treeview", background=pal["surface"],
+                        fieldbackground=pal["surface"],
+                        foreground=pal["fg"], rowheight=22)
+        style.configure("Treeview.Heading", background=pal["surface2"],
+                        foreground=pal["fg"])
+        style.map("Treeview",
+                  background=[("selected", pal["select_bg"])],
+                  foreground=[("selected", pal["select_fg"])])
+
+        # Progressbar
+        style.configure("TProgressbar", background=pal["accent"],
+                        troughcolor=pal["trough"])
+
+        # Scrollbars
+        style.configure("Vertical.TScrollbar", background=pal["surface2"],
+                        troughcolor=pal["bg"], bordercolor=pal["bg"],
+                        arrowcolor=pal["fg"])
+        style.map("Vertical.TScrollbar",
+                  background=[("active", pal["accent"])])
+        style.configure("Sticks.Vertical.TScrollbar", background="#f59b23",
+                        darkcolor="#a8620a", lightcolor="#f59b23",
+                        troughcolor=STICKS_BG, bordercolor=STICKS_BG,
+                        arrowcolor="#f2efe6")
+        style.map("Sticks.Vertical.TScrollbar",
+                  background=[("active", "#ffc069")])
+
+        # Panedwindow
+        style.configure("TPanedwindow", background=pal["bg"])
+
+        # Statusrad (egen stil så bakgrund följer temat)
+        style.configure("Status.TLabel", background=pal["surface"],
+                        foreground=pal["fg"])
+
+        # Loggruta (manuellt färgsatt tk.Text)
+        self.log.configure(bg=pal["surface"], fg=pal["fg"],
+                           insertbackground=pal["fg"],
+                           highlightbackground=pal["surface"],
+                           highlightcolor=pal["surface"])
+
+        # Special-etiketter som hade hårdkodade gråtoner
+        self.prog_info.config(foreground=pal["info_fg"])
+        self.curve_raw_lbl.config(foreground=pal["muted_fg"])
+
+        # conn_lbl har explicit foreground (röd/grön) – återställ den
+        # så den inte skrivs över av stilen.
+        self.conn_lbl.config(foreground="#008800" if self.connected
+                             else "#aa0000")
+
+        # Tvinga fram en ritomgång
+        self.update_idletasks()
 
     # -- uppbyggnad -------------------------------------------------------
     def _build_ui(self):
@@ -269,12 +429,15 @@ class SL88App(tk.Tk):
         self.ports_btn = ttk.Button(bar, text="Uppdatera portar",
                                     command=self.refresh_ports)
         self.ports_btn.pack(side="left", padx=2)
-        self.connect_btn = ttk.Button(bar, text="Anslut", command=self.toggle_connect)
+        self.connect_btn = ttk.Button(bar, text="Anslut",
+                                      command=self.toggle_connect)
         self.connect_btn.pack(side="left", padx=8)
-        self.dry_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Torrkörning (skickar inget)", variable=self.dry_var,
+        ttk.Checkbutton(bar, text="Torrkörning (skickar inget)",
+                        variable=self.dry_var
+                        if hasattr(self, "dry_var") else self._make_dry_var(),
                         command=self._on_dry_toggle).pack(side="left", padx=6)
-        self.conn_lbl = ttk.Label(bar, text="● ej ansluten", foreground="#aa0000")
+        self.conn_lbl = ttk.Label(bar, text="● ej ansluten",
+                                  foreground="#aa0000")
         self.conn_lbl.pack(side="right")
 
         # ---- delbar yta: programlista | programdetaljer ----
@@ -296,7 +459,8 @@ class SL88App(tk.Tk):
         ttk.Button(head, text="Rensa", width=7,
                    command=self._clear_log).pack(side="right")
         self.log = scrolledtext.ScrolledText(logf, height=8, wrap="none",
-                                             state="disabled", font=("TkFixedFont", 9))
+                                             state="disabled",
+                                             font=("TkFixedFont", 9))
         self.log.pack(fill="x", pady=(2, 0))
 
         # ---- statusrad ----
@@ -304,10 +468,17 @@ class SL88App(tk.Tk):
         status.grid(row=3, column=0, sticky="ew")
         status.columnconfigure(0, weight=1)
         self.status_var = tk.StringVar(value="Redo. Välj MIDI-port och klicka Anslut.")
-        ttk.Label(status, textvariable=self.status_var, anchor="w",
-                  relief="sunken", padding=(6, 3)).grid(row=0, column=0, sticky="ew")
+        self.status_lbl = ttk.Label(status, textvariable=self.status_var,
+                                    anchor="w", style="Status.TLabel",
+                                    padding=(6, 3))
+        self.status_lbl.grid(row=0, column=0, sticky="ew")
         self.progress = ttk.Progressbar(status, mode="indeterminate", length=140)
         self.progress.grid(row=0, column=1, padx=4, pady=2)
+
+    def _make_dry_var(self):
+        # Säkerställ att dry_var finns innan checkbutton skapas.
+        self.dry_var = tk.BooleanVar(value=False)
+        return self.dry_var
 
     def _build_program_list(self, parent):
         parent.rowconfigure(2, weight=1)
@@ -336,10 +507,10 @@ class SL88App(tk.Tk):
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
-
         btns = ttk.Frame(parent)
         btns.grid(row=3, column=0, sticky="ew", pady=6)
-        self.dump_btn = ttk.Button(btns, text="Läs config dump", command=self.load_dump)
+        self.dump_btn = ttk.Button(btns, text="Läs config dump",
+                                   command=self.load_dump)
         self.dump_btn.pack(side="left")
         self.reload_btn = ttk.Button(btns, text="Läs om program",
                                      command=self.reload_program)
@@ -351,7 +522,6 @@ class SL88App(tk.Tk):
     def _build_details(self, parent):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
-
         # ---- programnamn ----
         pf = ttk.LabelFrame(parent, text="PROGRAM", padding=8)
         pf.grid(row=0, column=0, sticky="ew")
@@ -363,10 +533,11 @@ class SL88App(tk.Tk):
                                     validate="key", validatecommand=vcmd)
         self.name_entry.grid(row=0, column=1, sticky="w", padx=6)
         self.name_entry.bind("<Return>", lambda e: self.save_name())
-        self.save_btn = ttk.Button(pf, text="Spara namn", command=self.save_name)
+        self.save_btn = ttk.Button(pf, text="Spara namn",
+                                   command=self.save_name)
         self.save_btn.grid(row=0, column=2, sticky="e")
-        ttk.Label(pf, text=f"(max {p.NAME_LENGTH} tecken)").grid(row=0, column=3, padx=6)
-
+        ttk.Label(pf, text=f"(max {p.NAME_LENGTH} tecken)").grid(
+            row=0, column=3, padx=6)
         opt = ttk.Frame(pf)
         opt.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
         self.store_var = tk.BooleanVar(value=True)
@@ -375,8 +546,10 @@ class SL88App(tk.Tk):
                         variable=self.store_var).pack(side="left")
         ttk.Checkbutton(opt, text="Verifiera / läs tillbaka (långsammare)",
                         variable=self.verify_var).pack(side="left", padx=12)
-        self.prog_info = ttk.Label(pf, text="Inget program valt.", foreground="#555")
-        self.prog_info.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.prog_info = ttk.Label(pf, text="Inget program valt.",
+                                   foreground="#555")
+        self.prog_info.grid(row=2, column=0, columnspan=4, sticky="w",
+                            pady=(6, 0))
         self._prog_widgets += [self.name_entry, self.save_btn]
 
         # ---- flikar: zoner, sticks och kurvor ----
@@ -401,11 +574,12 @@ class SL88App(tk.Tk):
         for z in range(1, p.NUM_ZONES + 1):
             ttk.Label(zf, text=f"ZON {z}", font=("", 9, "bold"),
                       foreground=ZONE_STYLES[z]["deep"]).grid(
-                row=z, column=0, sticky="w", padx=5, pady=3)
+                          row=z, column=0, sticky="w", padx=5, pady=3)
             var = tk.StringVar()
             self.zone_vars.append(var)
             ttk.Combobox(zf, textvariable=var, values=CURVE_CHOICES,
-                         state="readonly", width=12).grid(row=z, column=1, padx=5)
+                         state="readonly", width=12).grid(
+                             row=z, column=1, padx=5)
             btn = ttk.Button(zf, text="Sätt", width=6,
                              command=lambda z=z: self.apply_curve(z))
             btn.grid(row=z, column=2, padx=2)
@@ -416,24 +590,25 @@ class SL88App(tk.Tk):
                 lbl = ttk.Label(zf, text="–")
                 lbl.grid(row=z, column=col, sticky="w", padx=5)
                 self.zone_labels[(z, field)] = lbl
-
         ttk.Label(zf, text="* råvärden ur programdatan (okodade).",
-                  foreground="#666").grid(row=p.NUM_ZONES + 1, column=0, columnspan=9,
-                                          sticky="w", pady=(10, 0))
-        self.curve_raw_lbl = ttk.Label(zf, text="", foreground="#666", wraplength=680,
-                                       justify="left")
-        self.curve_raw_lbl.grid(row=p.NUM_ZONES + 2, column=0, columnspan=9, sticky="w")
-        ttk.Label(zf, text="Att sätta kurva skriver hela kurvtyp-byten och stänger av "
-                           "fast velocity för zonen.", foreground="#a05",
+                  foreground="#666").grid(row=p.NUM_ZONES + 1, column=0,
+                                          columnspan=9, sticky="w",
+                                          pady=(10, 0))
+        self.curve_raw_lbl = ttk.Label(zf, text="", foreground="#666",
+                                       wraplength=680, justify="left")
+        self.curve_raw_lbl.grid(row=p.NUM_ZONES + 2, column=0, columnspan=9,
+                                sticky="w")
+        ttk.Label(zf, text="Att sätta kurva skriver hela kurvtyp-byten och "
+                  "stänger av fast velocity för zonen.", foreground="#a05",
                   wraplength=680, justify="left").grid(
-            row=p.NUM_ZONES + 3, column=0, columnspan=9, sticky="w", pady=(8, 0))
+                      row=p.NUM_ZONES + 3, column=0, columnspan=9,
+                      sticky="w", pady=(8, 0))
 
     # ---- STICKS ---------------------------------------------------------
     def _build_sticks(self, parent):
         """Färgkodad, scrollbar vy: STICK 1-3 X/Y för varje zon."""
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
-
         top = ttk.Frame(parent)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(top, text="STICK 1–3 · X/Y-parameter per zon",
@@ -447,14 +622,14 @@ class SL88App(tk.Tk):
         self._prog_widgets.append(self.sticks_all_btn)
         ttk.Label(top, text="Off=0 · Pitch Bend=1 · Aftertouch=2 · CC N = N+2",
                   foreground="#666").pack(side="right", padx=12)
-
         wrap = ttk.Frame(parent)
         wrap.grid(row=1, column=0, sticky="nsew")
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
         self.sticks_canvas = tk.Canvas(wrap, bg=STICKS_BG, highlightthickness=0)
         self.sticks_canvas.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(wrap, orient="vertical", style="Sticks.Vertical.TScrollbar",
+        sb = ttk.Scrollbar(wrap, orient="vertical",
+                           style="Sticks.Vertical.TScrollbar",
                            command=self.sticks_canvas.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.sticks_canvas.configure(yscrollcommand=sb.set)
@@ -468,20 +643,20 @@ class SL88App(tk.Tk):
                 scrollregion=self.sticks_canvas.bbox("all")))
         self.sticks_canvas.bind(
             "<Configure>",
-            lambda e: self.sticks_canvas.itemconfigure(self._sticks_win, width=e.width))
+            lambda e: self.sticks_canvas.itemconfigure(
+                self._sticks_win, width=e.width))
         for seq in ("<Button-4>", "<Button-5>", "<MouseWheel>"):
             self.bind_all(seq, self._on_stick_wheel)
-
         for z in range(1, p.NUM_ZONES + 1):
             self._build_stick_zone(z)
-
         ttk.Label(self.sticks_inner,
                   text="Värdena är ANTAGANDE enligt mönstret CC N = N+2 "
                        "(Modulation = CC 1 = 3). Verifiera mot hårdvaran med "
                        "'Verifiera / läs tillbaka' ikryssad.",
                   background=STICKS_BG, foreground="#b9c0ca",
                   wraplength=700, justify="left").grid(
-            row=p.NUM_ZONES, column=0, sticky="w", padx=12, pady=(4, 12))
+                      row=p.NUM_ZONES, column=0, sticky="w", padx=12,
+                      pady=(4, 12))
 
     def _build_stick_zone(self, z):
         st = ZONE_STYLES[z]
@@ -490,7 +665,6 @@ class SL88App(tk.Tk):
         card.grid(row=z - 1, column=0, sticky="ew", padx=12, pady=6)
         for c in (1, 2):
             card.columnconfigure(c, weight=1)
-
         head = tk.Frame(card, bg=st["deep"])
         head.grid(row=0, column=0, columnspan=5, sticky="ew")
         tk.Label(head, text=f" {z} ", bg=st["bg"], fg=st["ink"],
@@ -503,18 +677,19 @@ class SL88App(tk.Tk):
         self.stick_range[z] = rng
         zbtn = tk.Button(head, text="Sätt zon",
                          command=lambda z=z: self.apply_zone_sticks(z),
-                         bg=st["bg"], fg=st["ink"], activebackground=st["tint"],
-                         activeforeground=st["ink"], disabledforeground="#9a9a9a",
-                         relief="flat", font=("", 9, "bold"), cursor="hand2", padx=8)
+                         bg=st["bg"], fg=st["ink"],
+                         activebackground=st["tint"],
+                         activeforeground=st["ink"],
+                         disabledforeground="#9a9a9a",
+                         relief="flat", font=("", 9, "bold"),
+                         cursor="hand2", padx=8)
         zbtn.pack(side="right", padx=6, pady=3)
         self._prog_widgets.append(zbtn)
-
         for c, txt in ((0, "Stick"), (1, "X-parameter"), (2, "Y-parameter"),
                        (3, "Råvärde"), (4, "")):
             tk.Label(card, text=txt, bg=st["bg"], fg=st["ink"],
                      font=("", 9, "bold")).grid(row=1, column=c, sticky="w",
                                                 padx=6, pady=(6, 2))
-
         for s in range(1, p.NUM_STICKS + 1):
             r = s + 1
             tk.Label(card, text=f"STICK {s}", bg=st["bg"], fg=st["ink"],
@@ -525,19 +700,22 @@ class SL88App(tk.Tk):
                 self.stick_vars[(z, s, axis)] = var
                 ttk.Combobox(card, textvariable=var, values=STICK_CHOICES,
                              state="readonly", width=22).grid(
-                    row=r, column=col, sticky="ew", padx=6, pady=3)
-            raw = tk.Label(card, text="–", bg=st["bg"], fg=st["ink"],
-                           font=("TkFixedFont", 9))
-            raw.grid(row=r, column=3, sticky="w", padx=6)
-            self.stick_raw[(z, s)] = raw
-            btn = tk.Button(card, text="Sätt", width=6,
-                            command=lambda z=z, s=s: self.apply_stick(z, s),
-                            bg=st["deep"], fg="#ffffff", activebackground=st["ink"],
-                            activeforeground="#ffffff", disabledforeground="#c9c9c9",
-                            relief="flat", font=("", 9, "bold"), cursor="hand2")
-            btn.grid(row=r, column=4, padx=6, pady=3)
-            self._prog_widgets.append(btn)
-
+                                 row=r, column=col, sticky="ew", padx=6,
+                                 pady=3)
+                raw = tk.Label(card, text="–", bg=st["bg"], fg=st["ink"],
+                               font=("TkFixedFont", 9))
+                raw.grid(row=r, column=3, sticky="w", padx=6)
+                self.stick_raw[(z, s)] = raw
+                btn = tk.Button(card, text="Sätt", width=6,
+                                command=lambda z=z, s=s: self.apply_stick(z, s),
+                                bg=st["deep"], fg="#ffffff",
+                                activebackground=st["ink"],
+                                activeforeground="#ffffff",
+                                disabledforeground="#c9c9c9",
+                                relief="flat", font=("", 9, "bold"),
+                                cursor="hand2")
+                btn.grid(row=r, column=4, padx=6, pady=3)
+                self._prog_widgets.append(btn)
         tk.Frame(card, bg=st["bg"], height=6).grid(
             row=p.NUM_STICKS + 2, column=0, columnspan=5, sticky="ew")
 
@@ -560,8 +738,9 @@ class SL88App(tk.Tk):
         cf.columnconfigure(0, weight=1)
         ttk.Label(cf, text="Kurvdefinitioner från config dump (plats 0–8)").grid(
             row=0, column=0, sticky="w", pady=(0, 4))
-        self.curve_tree = ttk.Treeview(cf, columns=("slot", "val", "namn", "typ", "chk"),
-                                       show="headings", height=9)
+        self.curve_tree = ttk.Treeview(
+            cf, columns=("slot", "val", "namn", "typ", "chk"),
+            show="headings", height=9)
         for col, txt, w in (("slot", "Plats", 50), ("val", "Val", 90),
                             ("namn", "Namn", 160), ("typ", "Typ", 90),
                             ("chk", "Checksum", 90)):
@@ -577,14 +756,14 @@ class SL88App(tk.Tk):
         self.pending += 1
         if self.pending == 1:
             self.progress.start(12)
-        self._update_buttons()
+            self._update_buttons()
         self.worker.submit(Job(fn, on_done, label, key))
 
     def _job_finished(self):
         self.pending = max(0, self.pending - 1)
         if self.pending == 0:
             self.progress.stop()
-        self._update_buttons()
+            self._update_buttons()
 
     def _poll(self):
         """Tömmer kön från arbetstråden – allt här körs i GUI-tråden."""
@@ -664,10 +843,11 @@ class SL88App(tk.Tk):
             name = self.names.get(num - 1, "")
             if filt and filt not in str(num) and filt not in name.lower():
                 continue
-            self.tree.insert("", "end", iid=str(num), values=(num, name or "–"))
+            self.tree.insert("", "end", iid=str(num),
+                             values=(num, name or "–"))
         sel = self.current_program
         if sel is not None and self.tree.exists(str(sel)):
-            self.tree.selection_set(str(sel))   # utlöser event, men numret är samma
+            self.tree.selection_set(str(sel))
             self.tree.see(str(sel))
 
     def _fill_curves(self):
@@ -676,10 +856,12 @@ class SL88App(tk.Tk):
             self.curve_tree.delete(*kids)
         for slot in sorted(self.curves):
             c = self.curves[slot]
-            val = {0: "medium", 1: "soft", 2: "hard"}.get(slot, f"memory{slot + 1}")
+            val = {0: "medium", 1: "soft", 2: "hard"}.get(
+                slot, f"memory{slot + 1}")
             kind = "användare" if c["type"] == 0x55 else "faktori"
             self.curve_tree.insert("", "end", values=(
-                slot, val, c["name"], kind, "OK" if c["checksum_ok"] else "FEL"))
+                slot, val, c["name"], kind,
+                "OK" if c["checksum_ok"] else "FEL"))
 
     def _clear_zones(self):
         for var in self.zone_vars:
@@ -705,17 +887,21 @@ class SL88App(tk.Tk):
         self.prog_info.config(
             text=f"Program {num} • namn {pdata['name']!r} • checksum {chk}")
         if not pdata["checksum_ok"]:
-            self._append_log(f"VARNING: checksumfel i programdata för program {num}.")
+            self._append_log(
+                f"VARNING: checksumfel i programdata för program {num}.")
         for z, zd in enumerate(pdata["zones"], start=1):
             choice = p.curve_choice_from_type(zd["curve_type"])
             self.zone_vars[z - 1].set(choice or "")
             self.zone_labels[(z, "enabled")].config(text=str(zd["enabled"]))
-            self.zone_labels[(z, "midi_channel")].config(text=str(zd["midi_channel"]))
-            self.zone_labels[(z, "midi_port")].config(text=str(zd["midi_port"]))
+            self.zone_labels[(z, "midi_channel")].config(
+                text=str(zd["midi_channel"]))
+            self.zone_labels[(z, "midi_port")].config(
+                text=str(zd["midi_port"]))
             self.zone_labels[(z, "volume")].config(text=str(zd["volume"]))
             self.zone_labels[(z, "range")].config(
                 text=f"{note_name(zd['low_key'])}–{note_name(zd['high_key'])}")
-            self.zone_labels[(z, "fixed_velocity")].config(text=str(zd["fixed_velocity"]))
+            self.zone_labels[(z, "fixed_velocity")].config(
+                text=str(zd["fixed_velocity"]))
         self._update_curve_raw()
         self._show_sticks(pdata)
         self._update_buttons()
@@ -729,14 +915,16 @@ class SL88App(tk.Tk):
             for s in range(1, p.NUM_STICKS + 1):
                 xv = zd.get(p.stick_field(s, "x"), 0)
                 yv = zd.get(p.stick_field(s, "y"), 0)
-                self.stick_vars[(z, s, "x")].set(p.stick_param_choice_from_value(xv) or "")
-                self.stick_vars[(z, s, "y")].set(p.stick_param_choice_from_value(yv) or "")
+                self.stick_vars[(z, s, "x")].set(
+                    p.stick_param_choice_from_value(xv) or "")
+                self.stick_vars[(z, s, "y")].set(
+                    p.stick_param_choice_from_value(yv) or "")
                 self.stick_raw[(z, s)].config(text=f"X {xv} · Y {yv}")
                 for axis, val in (("x", xv), ("y", yv)):
                     if p.stick_param_choice_from_value(val) is None:
                         self._append_log(
-                            f"Zon {z} stick {s} {axis.upper()}: okänt värde {val} "
-                            "– välj parameter manuellt.")
+                            f"Zon {z} stick {s} {axis.upper()}: okänt värde "
+                            f"{val} – välj parameter manuellt.")
 
     def _update_curve_raw(self):
         if not self.pdata:
@@ -745,25 +933,26 @@ class SL88App(tk.Tk):
         parts = [f"zon {i + 1}: {p.describe_curve_type(z['curve_type'])} "
                  f"(0x{z['curve_type']:02X})"
                  for i, z in enumerate(self.pdata["zones"])]
-        self.curve_raw_lbl.config(text="Kurvtyp i datan – " + " | ".join(parts))
+        self.curve_raw_lbl.config(
+            text="Kurvtyp i datan – " + " | ".join(parts))
 
     # -- åtgärder (allt tungt sker i arbetstråden) -------------------------
     def refresh_ports(self):
         def fn(_ed):
             return {"in": mido.get_input_names(), "out": mido.get_output_names()}
-
         def done(res):
             values = sorted(set(res["in"]) | set(res["out"]))
             self.port_cb["values"] = values
             current = self.port_var.get().strip()
-            if values and not any(current.lower() in v.lower() for v in values):
-                sl = [v for v in values if "sl" in v.lower() and "studio" in v.lower()]
+            if values and not any(current.lower() in v.lower()
+                                  for v in values):
+                sl = [v for v in values if "sl" in v.lower()
+                      and "studio" in v.lower()]
                 pref = [v for v in sl if "midi 2" in v.lower()] or sl
                 self.port_var.set(pref[0] if pref else values[0])
             self._append_log(f"Ingångar: {res['in']}")
             self._append_log(f"Utgångar: {res['out']}")
             self.status_var.set(f"Hittade {len(values)} MIDI-portar.")
-
         self._submit(fn, done, "Listar MIDI-portar", key="ports")
 
     def toggle_connect(self):
@@ -775,46 +964,40 @@ class SL88App(tk.Tk):
     def _connect(self):
         port = self.port_var.get().strip()
         if not port:
-            messagebox.showwarning("SL88", "Ange en MIDI-port (del av namnet räcker).")
+            messagebox.showwarning("SL88",
+                                   "Ange en MIDI-port (del av namnet räcker).")
             return
         dry = self.dry_var.get()
-
         def fn(_ed):
             self.worker.close_editor()
-            self.worker.editor = SL88Editor(port, dry_run=dry)  # kan kasta RuntimeError
+            self.worker.editor = SL88Editor(port, dry_run=dry)
             return {"port": port}
-
         def done(res):
             self._set_connected(True)
             self.status_var.set(f"Ansluten till {res['port']}.")
             self.load_dump()
-
         self._submit(fn, done, f"Ansluter till '{port}'", key="connect")
 
     def _disconnect(self):
         def fn(_ed):
             self.worker.close_editor()
             return {}
-
         def done(_res):
             self._set_connected(False)
             self.status_var.set("Frånkopplad.")
-
         self._submit(fn, done, "Kopplar från", key="connect")
 
     def _on_dry_toggle(self):
         dry = self.dry_var.get()
         if not self.connected:
             return
-
         def fn(ed):
             require(ed).dry_run = dry
             return {"dry": dry}
-
         def done(res):
-            self.status_var.set("Torrkörning PÅ – inget skickas." if res["dry"]
-                                else "Torrkörning AV – skickar på riktigt.")
-
+            self.status_var.set(
+                "Torrkörning PÅ – inget skickas." if res["dry"]
+                else "Torrkörning AV – skickar på riktigt.")
         self._submit(fn, done, "Uppdaterar torrkörning", key="dry")
 
     def load_dump(self):
@@ -822,16 +1005,15 @@ class SL88App(tk.Tk):
             require(ed)
             count = ed.request_config_dump(timeout=DUMP_TIMEOUT, summary=False)
             return {"count": count, **snapshot(ed)}
-
         def done(res):
             self.names = res["names"]
             self.curves = res["curves"]
             self._fill_tree()
             self._fill_curves()
-            self.status_var.set(f"Dump: {res['count']} meddelanden, "
-                                f"{len(self.names)} programnamn, "
-                                f"{len(self.curves)} kurvor.")
-
+            self.status_var.set(
+                f"Dump: {res['count']} meddelanden, "
+                f"{len(self.names)} programnamn, "
+                f"{len(self.curves)} kurvor.")
         self._submit(fn, done, "Läser config dump", key="dump")
 
     def _on_select(self, _event=None):
@@ -845,13 +1027,14 @@ class SL88App(tk.Tk):
             self.status_var.set("Inte ansluten – klicka Anslut först.")
             return
         if self.dry_var.get():
-            # I torrkörning skickas ingen Recall -> ingen läsning att visa.
             self.current_program = num
             self.pdata = None
             self._clear_zones()
             self.name_var.set(self.names.get(num - 1, ""))
-            self.prog_info.config(text=f"Program {num} (torrkörning – ingen läsning)")
-            self.status_var.set(f"Torrkörning: program {num} valt, inget läses.")
+            self.prog_info.config(
+                text=f"Program {num} (torrkörning – ingen läsning)")
+            self.status_var.set(
+                f"Torrkörning: program {num} valt, inget läses.")
             self._update_buttons()
             return
         self.load_program(num)
@@ -862,12 +1045,10 @@ class SL88App(tk.Tk):
         self._clear_zones()
         self.prog_info.config(text=f"Program {num} – läser …")
         self._update_buttons()
-
         def fn(ed):
             require(ed)
-            pdata = ed.read_program(num)   # Recall (+ config dump som fallback)
+            pdata = ed.read_program(num)
             return {"pdata": pdata, **snapshot(ed)}
-
         def done(res):
             if res["names"]:
                 self.names = res["names"]
@@ -876,12 +1057,14 @@ class SL88App(tk.Tk):
                 self._fill_curves()
             pdata = res["pdata"]
             if pdata is None:
-                self.prog_info.config(text=f"Program {num} – ingen programdata mottogs.")
-                self.status_var.set(f"Program {num}: ingen programdata (01) i svaret.")
+                self.prog_info.config(
+                    text=f"Program {num} – ingen programdata mottogs.")
+                self.status_var.set(
+                    f"Program {num}: ingen programdata (01) i svaret.")
                 return
             self._show_program(num, pdata)
-            self.status_var.set(f"Program {num} inläst: {pdata['name']!r}")
-
+            self.status_var.set(
+                f"Program {num} inläst: {pdata['name']!r}")
         self._submit(fn, done, f"Läser program {num}", key="load")
 
     def reload_program(self):
@@ -895,28 +1078,28 @@ class SL88App(tk.Tk):
             return
         name = self.name_var.get()
         store, verify = self.store_var.get(), self.verify_var.get()
-
         def fn(ed):
             require(ed)
             ok = ed.rename_program(num, name, store=store, verify=verify)
             return {"ok": ok, **snapshot(ed)}
-
         def done(res):
             if res["dry_run"]:
                 self.status_var.set("Torrkörning – namnet skickades inte.")
                 return
             self.names = res["names"] or self.names
             if not store:
-                self.names[num - 1] = name.rstrip()   # finns bara i RAM
-            self._fill_tree()
+                self.names[num - 1] = name.rstrip()
+                self._fill_tree()
             if res["ok"] is False:
-                self.status_var.set(f"Verifiering AVVEK för program {num} – se loggen.")
+                self.status_var.set(
+                    f"Verifiering AVVEK för program {num} – se loggen.")
             elif store:
-                self.status_var.set(f"Program {num} sparat som {name.rstrip()!r}.")
+                self.status_var.set(
+                    f"Program {num} sparat som {name.rstrip()!r}.")
             else:
-                self.status_var.set(f"Namn ändrat i RAM för program {num} "
-                                    "(STORE av – försvinner vid programbyte).")
-
+                self.status_var.set(
+                    f"Namn ändrat i RAM för program {num} "
+                    "(STORE av – försvinner vid programbyte).")
         self._submit(fn, done, f"Byter namn på program {num}", key="write")
 
     def apply_curve(self, zone):
@@ -926,21 +1109,22 @@ class SL88App(tk.Tk):
             return
         choice = self.zone_vars[zone - 1].get()
         if not choice:
-            messagebox.showinfo("SL88", f"Välj en kurva för zon {zone} "
-                                        f"({p.CURVE_CHOICE_HELP}).")
+            messagebox.showinfo("SL88",
+                                f"Välj en kurva för zon {zone} "
+                                f"({p.CURVE_CHOICE_HELP}).")
             return
         store, verify = self.store_var.get(), self.verify_var.get()
-
         def fn(ed):
             require(ed)
-            ed.set_velocity_curve(choice, zone=zone, program_number=num, store=store)
+            ed.set_velocity_curve(choice, zone=zone, program_number=num,
+                                  store=store)
             pdata = ed.read_program(num) if (verify and not ed.dry_run) else None
             return {"pdata": pdata, **snapshot(ed)}
-
         def done(res):
             if res["dry_run"]:
-                self.status_var.set(f"Torrkörning – kurva {choice} zon {zone} "
-                                    "skickades inte.")
+                self.status_var.set(
+                    f"Torrkörning – kurva {choice} zon {zone} "
+                    "skickades inte.")
                 return
             if res["pdata"] is not None:
                 self.names = res["names"] or self.names
@@ -948,31 +1132,34 @@ class SL88App(tk.Tk):
                 self._show_program(num, res["pdata"])
                 got = p.curve_choice_from_type(
                     res["pdata"]["zones"][zone - 1]["curve_type"])
-                self.status_var.set(f"Zon {zone}: {choice} skickat, tillbaka läst: {got}.")
+                self.status_var.set(
+                    f"Zon {zone}: {choice} skickat, tillbaka läst: {got}.")
             else:
                 if self.pdata:
-                    self.pdata["zones"][zone - 1]["curve_type"] = p.curve_type_value(choice)
+                    self.pdata["zones"][zone - 1]["curve_type"] = \
+                        p.curve_type_value(choice)
                     self._update_curve_raw()
-                self.status_var.set(f"Zon {zone}: kurva {choice} satt"
-                                    + (" och sparad (STORE)." if store else " (ej STORE)."))
-
-        self._submit(fn, done, f"Sätter kurva {choice} i zon {zone}", key="write")
+                self.status_var.set(
+                    f"Zon {zone}: kurva {choice} satt"
+                    + (" och sparad (STORE)." if store else " (ej STORE)."))
+        self._submit(fn, done, f"Sätter kurva {choice} i zon {zone}",
+                     key="write")
 
     # ---- STICKS: åtgärder ----------------------------------------------
     def _stick_values(self, zone, sticks):
-        """Läser dropdowns för valda sticks i en zon -> [(stick, xv, yv, xval, yval)].
-        Visar felruta och returnerar None om något är ogiltigt."""
+        """Läser dropdowns för valda sticks i en zon."""
         out = []
         for s in sticks:
             xval = self.stick_vars[(zone, s, "x")].get()
             yval = self.stick_vars[(zone, s, "y")].get()
             if not xval or not yval:
-                messagebox.showinfo("SL88", f"Välj både X- och Y-parameter för "
-                                            f"STICK {s} i zon {zone}.")
+                messagebox.showinfo("SL88",
+                                    f"Välj både X- och Y-parameter för "
+                                    f"STICK {s} i zon {zone}.")
                 return None
             try:
-                out.append((s, p.stick_param_value(xval), p.stick_param_value(yval),
-                            xval, yval))
+                out.append((s, p.stick_param_value(xval),
+                            p.stick_param_value(yval), xval, yval))
             except ValueError as exc:
                 messagebox.showerror("SL88", str(exc))
                 return None
@@ -982,11 +1169,10 @@ class SL88App(tk.Tk):
         """changes: {zon: [(stick, xv, yv, xval, yval), ...]}"""
         num = self.current_program
         store, verify = self.store_var.get(), self.verify_var.get()
-
         def fn(ed):
             require(ed)
             if not ed.dry_run:
-                ed.recall_program(num)          # ett Recall för hela batchen
+                ed.recall_program(num)
             for zone, items in changes.items():
                 for s, xv, yv, _x, _y in items:
                     ed.set_zone_field(p.stick_field(s, "x"), zone, xv)
@@ -995,16 +1181,17 @@ class SL88App(tk.Tk):
                 ed.store_program(num)
             pdata = ed.read_program(num) if (verify and not ed.dry_run) else None
             return {"pdata": pdata, **snapshot(ed)}
-
         def done(res):
             if res["dry_run"]:
-                self.status_var.set(f"Torrkörning – {label} skickades inte.")
+                self.status_var.set(
+                    f"Torrkörning – {label} skickades inte.")
                 return
             if res["pdata"] is not None:
                 self.names = res["names"] or self.names
                 self._fill_tree()
                 self._show_program(num, res["pdata"])
-                self.status_var.set(f"{label}: skickat och tillbaka läst – se STICKS.")
+                self.status_var.set(
+                    f"{label}: skickat och tillbaka läst – se STICKS.")
                 return
             if self.pdata:
                 for zone, items in changes.items():
@@ -1012,9 +1199,9 @@ class SL88App(tk.Tk):
                         self.pdata["zones"][zone - 1][p.stick_field(s, "x")] = xv
                         self.pdata["zones"][zone - 1][p.stick_field(s, "y")] = yv
                 self._show_sticks(self.pdata)
-            self.status_var.set(f"{label}: skickat"
-                                + (" och sparat (STORE)." if store else " (ej STORE)."))
-
+            self.status_var.set(
+                f"{label}: skickat"
+                + (" och sparat (STORE)." if store else " (ej STORE)."))
         self._submit(fn, done, label, key="write")
 
     def apply_stick(self, zone, stick):
@@ -1024,7 +1211,8 @@ class SL88App(tk.Tk):
         items = self._stick_values(zone, [stick])
         if items is None:
             return
-        self._apply_sticks({zone: items}, f"Sätter STICK {stick} X/Y i zon {zone}")
+        self._apply_sticks({zone: items},
+                           f"Sätter STICK {stick} X/Y i zon {zone}")
 
     def apply_zone_sticks(self, zone):
         if self.current_program is None:
@@ -1033,7 +1221,8 @@ class SL88App(tk.Tk):
         items = self._stick_values(zone, range(1, p.NUM_STICKS + 1))
         if items is None:
             return
-        self._apply_sticks({zone: items}, f"Sätter alla sticks i zon {zone}")
+        self._apply_sticks({zone: items},
+                           f"Sätter alla sticks i zon {zone}")
 
     def apply_all_sticks(self):
         if self.current_program is None:
@@ -1045,21 +1234,20 @@ class SL88App(tk.Tk):
             if items is None:
                 return
             changes[z] = items
-        self._apply_sticks(changes, "Sätter alla sticks i alla zoner (24 fält)")
+        self._apply_sticks(changes,
+                           "Sätter alla sticks i alla zoner (24 fält)")
 
     # -- avslut -----------------------------------------------------------
     def _on_close(self):
         self.closing = True
         self.worker.stop()
-        self.worker.join(timeout=1.0)   # låt ett pågående jobb avslutas snyggt
+        self.worker.join(timeout=1.0)
         self.destroy()
-
 
 def main():
     app = SL88App()
     app.mainloop()
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
