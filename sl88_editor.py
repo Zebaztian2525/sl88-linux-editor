@@ -2,31 +2,26 @@
 # -*- coding: utf-8 -*-
 """
 sl88_editor.py - Minimal Linux-editor för Studiologic SL88 (SysEx via mido).
-
 Kräver sl88_protocol.py i samma mapp. Installation:
-  sudo apt install build-essential python3-dev python3-venv libasound2-dev libjack-dev
-  python3 -m venv ~/sl88env && source ~/sl88env/bin/activate
-  pip install mido python-rtmidi
-
+sudo apt install build-essential python3-dev python3-venv libasound2-dev libjack-dev
+python3 -m venv ~/sl88env && source ~/sl88env/bin/activate
+pip install mido python-rtmidi
 Användning (portnamn = delsträng, se --list):
-  python3 sl88_editor.py --list
-  python3 sl88_editor.py --check                      # API + självtest, ingen hårdvara
-  python3 sl88_editor.py --port "SL STUDIO MIDI 2" --dump
-  python3 sl88_editor.py --port "SL STUDIO MIDI 2" --read 250 --send
-  python3 sl88_editor.py --port "SL STUDIO MIDI 2" --rename 250 "TEST NAMN" --send --store --verify
-  python3 sl88_editor.py --port "SL STUDIO MIDI 2" --program 250 --curve soft --zone 1 --send
-  python3 sl88_editor.py --port "SL STUDIO MIDI 2" --program 250 --zone 1 \
-      --stick 1 "Pitch Bend" "CC 1 (Modulation)" --send --store
-
+python3 sl88_editor.py --list
+python3 sl88_editor.py --check                      # API + självtest, ingen hårdvara
+python3 sl88_editor.py --port "SL STUDIO MIDI 2" --dump
+python3 sl88_editor.py --port "SL STUDIO MIDI 2" --read 250 --send
+python3 sl88_editor.py --port "SL STUDIO MIDI 2" --rename 250 "TEST NAMN" --send --store --verify
+python3 sl88_editor.py --port "SL STUDIO MIDI 2" --program 250 --curve soft --zone 1 --send
+python3 sl88_editor.py --port "SL STUDIO MIDI 2" --program 250 --zone 1 \
+--stick 1 "Pitch Bend" "CC 1 (Modulation)" --send --store
 Terminologi följer SL Editor-manualen: PROGRAM, STORE, ZONE 1-4, STICK 1-3,
 SL CURVES (soft, medium, hard, memory4..memory9).
 rename/curve/stick är TORRKÖRNING tills du lägger till --send.
 """
-
 import argparse
 import sys
 import time
-
 import mido
 import sl88_protocol as p
 
@@ -43,10 +38,11 @@ GUI_API_PROTOCOL = [
     "build_alter_active_program", "build_rename", "build_set_curve",
     "build_set_stick", "hexdump",
 ]
+
 GUI_API_EDITOR = [
     "request_config_dump", "read_program", "recall_program", "store_program",
     "rename_program", "set_velocity_curve", "set_zone_field", "set_stick",
-    "poke", "close",
+    "poke", "close", "send_curve",
 ]
 
 
@@ -60,13 +56,12 @@ class SL88Editor:
         self.curves = {}            # kurvplats 0..8 -> tolkad kurva (dict)
         self.active_program = None  # senast mottagna programdata (01), tolkad
         self._closed = False
-
         in_name = self._match(port_name, mido.get_input_names())
         out_name = self._match(port_name, mido.get_output_names())
         self.inport = mido.open_input(in_name)
         self.outport = mido.open_output(out_name)
         self.in_name, self.out_name = in_name, out_name
-        print(f"Öppnade in: {in_name}\n         ut: {out_name}")
+        print(f"Öppnade in: {in_name}\nut: {out_name}")
 
     @staticmethod
     def _match(needle, names):
@@ -142,7 +137,6 @@ class SL88Editor:
         was_dry, self.dry_run = self.dry_run, False
         self._send(p.build_request_config_dump())
         self.dry_run = was_dry
-
         count = 0
         end = time.time() + timeout
         while time.time() < end:
@@ -192,11 +186,9 @@ class SL88Editor:
         """
         Väljer program (Recall) och returnerar dess tolkade programdata
         (dict från p.parse_program_data) eller None.
-
         Först lyssnar vi kort om SL88 självmant skickar programdatan efter
         Recall; annars faller vi tillbaka på en config dump, som innehåller
         det aktiva programmets data (01).
-
         I torrkörning skickas ingen Recall - då finns inget meningsfullt att
         läsa, och vi returnerar None i stället för att visa fel program.
         """
@@ -234,7 +226,6 @@ class SL88Editor:
         """
         Byter namn på program 1..250: Recall -> Alter Active Program -> (Store).
         Ändringen ligger bara i RAM tills store=True. Ingen checksum skickas.
-
         verify=True (kräver store och inte torrkörning): läser en ny config dump
         och jämför namnet. Returnerar True/False, eller None om verify ej kördes.
         """
@@ -264,14 +255,13 @@ class SL88Editor:
     def set_zone_field(self, field, zone, value, program_number=None, store=False):
         """
         Skriver ett zonfält (t.ex. 'volume', 'stick_1_x') för ZONE 1..4.
-
         field: fältnamn ur p.ZONE_FIELDS
         zone:  1..4 (offset = bas + zone - 1)
         value: Word 0..16383
         program_number: välj programmet först om angivet
         store: STORE efteråt (kräver program_number)
         """
-        offset = p.zone_offset(field, zone)      # validerar fält och zon
+        offset = p.zone_offset(field, zone)
         if not 0 <= value <= 0x3FFF:
             raise ValueError(f"value måste vara 0..16383, fick {value}")
         if store and program_number is None:
@@ -329,6 +319,48 @@ class SL88Editor:
         self._send(message)
         if store:
             self.store_program(program_number)
+
+    def send_curve(self, slot, table_16, name=None):
+        """
+        Skickar en redigerad USER-kurva (slot 3..8 = USER 1..6) till klaviaturet.
+        Interpolerar de 16 punkterna i GUI:t till exakt 127 tabellvärden som
+        protokollet (MSG_VELOCITY_CURVE 0x07) kräver.
+        """
+        if not 3 <= slot <= 8:
+            raise ValueError(f"Endast USER-kurvor (slot 3..8) kan skickas, fick {slot}")
+        if not table_16 or len(table_16) < 2:
+            raise ValueError("Kurvtabellen saknar punkter.")
+        # Interpolera från GUI:ts 16 punkter till 127 tabellvärden (0..127)
+        n_in = len(table_16)
+        n_out = p.CURVE_TABLE_VALUES  # 127
+        table_127 = []
+        for i in range(n_out):
+            pos = i * (n_in - 1) / float(n_out - 1)
+            lo = int(pos)
+            hi = min(lo + 1, n_in - 1)
+            frac = pos - lo
+            val = table_16[lo] * (1.0 - frac) + table_16[hi] * frac
+            table_127.append(int(round(max(0, min(127, val)))))
+        # Hämta befintligt namn och metadata om kurvan redan lästs in via dump
+        existing = self.curves.get(slot, {})
+        curve_name = (name or existing.get("name") or f"USER {slot - 2}")[:10]
+        points = existing.get("points", [])
+        lit1 = existing.get("literal1", 0)
+        lit2 = existing.get("literal2", 0)
+        # type_word = 0x0055 markerar användarkurva ("user") i SL88-protokollet
+        msg = p.build_velocity_curve(
+            slot=slot,
+            type_word=0x0055,
+            name=curve_name,
+            points=points,
+            table=table_127,
+            literal1=lit1,
+            literal2=lit2,
+            with_checksum=False,
+        )
+        self._send(msg)
+        if not self.dry_run:
+            time.sleep(0.15)
 
 
 # --------------------------------------------------------------------------
@@ -390,18 +422,14 @@ def main():
     ap.add_argument("--verify", action="store_true", help="läs tillbaka namnet efter --store")
     ap.add_argument("--send", action="store_true", help="skicka på riktigt (annars torrkörning)")
     args = ap.parse_args()
-
     if args.check:
         return check_api()
-
     if args.list:
         print("Ingångar:", *mido.get_input_names(), sep="\n")
         print("Utgångar:", *mido.get_output_names(), sep="\n")
         return 0
-
     if not args.port:
         ap.error("--port krävs (kör --list först)")
-
     p.OFFSET_MODE = args.offset_mode
     ed = SL88Editor(args.port, dry_run=not args.send)
     try:
