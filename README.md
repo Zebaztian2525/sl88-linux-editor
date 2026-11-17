@@ -144,7 +144,13 @@ python3 sl88_gui.py
 
 ### Using it together with a DAW
 
-You do not need to close your DAW. The SL88 has two MIDI ports. Start your DAW first and let it use the first port for playing notes. Then select **SL STUDIO MIDI 2** in the editor, which uses the second port for SysEx communication.
+You can use the editor and your DAW at the same time, but the order matters:
+
+1.  **Start the editor first** and connect to **SL STUDIO MIDI 2**.
+2.  **Then start your DAW.** It will use the first MIDI port for playing notes.
+3.  If the DAW cannot see the keyboard (because the editor grabbed the port first), click **Disconnect** in the editor and then **Connect** again. The DAW should now find the keyboard.
+
+*(Note: The editor uses the second MIDI port for SysEx, while the DAW uses the first port for notes. The exact behaviour may depend on your DAW and ALSA setup.)*
 
 ### About the MIDI port setting per zone
 
