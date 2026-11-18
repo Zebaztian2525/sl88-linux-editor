@@ -4,7 +4,8 @@ A native Linux editor for the **Studiologic SL88 Studio** MIDI keyboard, built b
 
 The official SL Editor only exists for Windows and macOS. This project gives Linux users a graphical editor (PyQt5) and a command-line tool for reading and changing programs, zones, velocity curves, sticks and pedals.
 
-![SL Editor](/home/janne/Downloads/SL Editor.png)
+<img width="1228" height="986" alt="SL Editor" src="https://github.com/user-attachments/assets/82b15883-9e82-47e3-82bc-e62b2d8606f1" />
+
 
 > **Status:** The protocol layer, the command-line tool and the main GUI features (programs, zones, MIDI channel/port, velocity curves, sticks) are working on real hardware. Some features are still **unverified** against the keyboard. See [Verification status](#verification-status).
 
