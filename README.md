@@ -79,7 +79,7 @@ Treat anything marked unverified as experimental.
 
 ## Requirements
 
-- Linux (developed and tested on Deepin 25.2, which is Debian-based)
+- Linux (developed and tested on Deepin 25.3, which is Debian-based)
 - Python 3
 - A Studiologic SL88 Studio connected via USB
 - Python packages: `mido`, `python-rtmidi`, `PyQt5`
