@@ -1656,6 +1656,7 @@ class SL88Window(QMainWindow):
         touch.addTab(self._build_curves_tab(), "SL CURVES")
         touch.addTab(self._build_keybalance_tab(), "KEY-BALANCE")
         self.tabs.addTab(touch, "SL TOUCH")
+        self.tabs.addTab(self._build_log_tab(), "LOG")
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 4)
@@ -1665,21 +1666,7 @@ class SL88Window(QMainWindow):
         self.keyboard = KeyboardWidget()
         root.addWidget(self.keyboard)
 
-        self.log_dock = QDockWidget("Log (SysEx and status)", self)
-        self.log_dock.setAllowedAreas(Qt.BottomDockWidgetArea)
-        logw = QWidget()
-        ll = QVBoxLayout(logw)
-        ll.setContentsMargins(4, 4, 4, 4)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(MAX_LOG_LINES)
-        ll.addWidget(self.log)
-        clear = QPushButton("Clear")
-        clear.clicked.connect(self.log.clear)
-        ll.addWidget(clear, 0, Qt.AlignRight)
-        self.log_dock.setWidget(logw)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-        self.log_dock.setMaximumHeight(170)
+
 
         self.status_lbl = QLabel("Ready. Choose MIDI port and click Connect.")
         self.statusBar().addWidget(self.status_lbl, 1)
@@ -1697,7 +1684,6 @@ class SL88Window(QMainWindow):
         self.dark_action.setShortcut("Ctrl+D")
         self.dark_action.toggled.connect(self._toggle_dark_mode)
         view.addAction(self.dark_action)
-        view.addAction(self.log_dock.toggleViewAction())
 
     def _build_program_list(self):
         w = QWidget()
@@ -1751,6 +1737,23 @@ class SL88Window(QMainWindow):
         small_font(note, 8, False)
         note.setWordWrap(True)
         grid.addWidget(note, 2, 0, 1, 2)
+        return w
+
+    def _build_log_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        head = QLabel("LOG – SysEx and status messages")
+        small_font(head, 10)
+        lay.addWidget(head)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(MAX_LOG_LINES)
+        lay.addWidget(self.log, 1)
+        clear = QPushButton("Clear Log")
+        clear.clicked.connect(self.log.clear)
+        lay.addWidget(clear, 0, Qt.AlignRight)
         return w
 
     def _build_zone_tab(self):
